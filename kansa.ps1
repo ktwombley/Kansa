@@ -6,10 +6,10 @@ environments.
 Kansa is a modular, PowerShell based incident response framework for
 Windows environments that have Windows Remote Management enabled.
 
-Kansa looks for a modules.conf file in the .\Modules directory. If one
+Kansa looks for a Modules.conf file in the .\Modules directory. If one 
 is found, it controls which modules execute and in what order. If no 
-modules.conf is found, all modules will be executed in the order that 
-ls reads them.
+modules.conf is found, all modules will be executed in the order that
+Get-ChildItem reads them.
 
 After parsing modules.conf or the -ModulesPath parameter argument, 
 Kansa will execute each module on each target (remote host) and 
@@ -43,11 +43,16 @@ http://www.microsoft.com/en-us/download/default.aspx
 
 .PARAMETER ModulePath
 An optional parameter, default value is .\Modules\, that specifies the
-path to the collector modules or a specific module. Spaces in the path 
-are not supported, however, ModulePath may point directly to a specific 
-module and if that module takes a parameter, you should have a space 
-between the path to the script and its first argument, put the whole 
-thing in quotes. See example.
+path to the collector modules or a specific module. ModulePath may point
+directly to a specific module and if that module takes a parameter, put
+it into the Arguments parameter (see below). Kansa no longer requires
+or allows arguments to be included in the ModulePath parameter.
+
+.PARAMETER Arguments
+An optional parameter that specifies arguments for the module specified
+in ModulePath. Named arguments are not supported, so they must be supplied
+in the same order as defined in the module. This allows you to specify
+more complicated arguments such as a list of files. See example.
 
 .PARAMETER TargetList
 An optional parameter, the name of a file containing a list of servers 
@@ -213,7 +218,12 @@ user credential under which to execute. The -Transcribe flag is also
 supplied, causing all script output to be written to a transcript. By
 default, the script will also output verbose runstate information.
 .EXAMPLE
-Kansa.ps1 -ModulePath ".\Modules\Disk\Get-File.ps1 C:\Windows\WindowsUpdate.log" -Target HHWWSQL01
+Kansa.ps1 -ModulePath ".\Modules\Disk\Get-File.ps1" -Arguments "C:\Windows\WindowsUpdate.log" -Target HHWWSQL01
+In this example -ModulePath refers to a specific module that takes a 
+positional parameter (only positional parameters are supported) and the
+script is being run against a single target.
+.EXAMPLE
+Kansa.ps1 -ModulePath ".\Modules\Disk\Get-File.ps1" -Arguments @("C:\Windows\WindowsUpdate.log","C:\temp\foo.txt")
 In this example -ModulePath refers to a specific module that takes a 
 positional parameter (only positional parameters are supported) and the
 script is being run against a single target.
@@ -234,46 +244,48 @@ Param(
     [Parameter(Mandatory=$False,Position=0)]
         [String]$ModulePath="Modules\",
     [Parameter(Mandatory=$False,Position=1)]
-        [String]$TargetList=$Null,
+        [Object[]]$Arguments,
     [Parameter(Mandatory=$False,Position=2)]
-        [String]$Target=$Null,
+        [String]$TargetList=$Null,
     [Parameter(Mandatory=$False,Position=3)]
-        [int]$TargetCount=0,
+        [String]$Target=$Null,
     [Parameter(Mandatory=$False,Position=4)]
-        [System.Management.Automation.PSCredential]$Credential=$Null,
+        [int]$TargetCount=0,
     [Parameter(Mandatory=$False,Position=5)]
+        [System.Management.Automation.PSCredential]$Credential=$Null,
+    [Parameter(Mandatory=$False,Position=6)]
     [ValidateSet("CSV","JSON","TSV","XML")]
         [String]$OutputFormat="CSV",
-    [Parameter(Mandatory=$False,Position=6)]
-        [Switch]$Pushbin,
     [Parameter(Mandatory=$False,Position=7)]
-        [Switch]$Rmbin,
+        [Switch]$Pushbin,
     [Parameter(Mandatory=$False,Position=8)]
-        [Int]$ThrottleLimit=0,
+        [Switch]$Rmbin,
     [Parameter(Mandatory=$False,Position=9)]
+        [Int]$ThrottleLimit=0,
+    [Parameter(Mandatory=$False,Position=10)]
     [ValidateSet("Ascii","BigEndianUnicode","Byte","Default","Oem","String","Unicode","Unknown","UTF32","UTF7","UTF8")]
         [String]$Encoding="Unicode",
-    [Parameter(Mandatory=$False,Position=10)]
-        [Switch]$UpdatePath,
     [Parameter(Mandatory=$False,Position=11)]
-        [Switch]$ListModules,
+        [Switch]$UpdatePath,
     [Parameter(Mandatory=$False,Position=12)]
-        [Switch]$ListAnalysis,
+        [Switch]$ListModules,
     [Parameter(Mandatory=$False,Position=13)]
-        [Switch]$Analysis,
+        [Switch]$ListAnalysis,
     [Parameter(Mandatory=$False,Position=14)]
-        [Switch]$Transcribe,
+        [Switch]$Analysis,
     [Parameter(Mandatory=$False,Position=15)]
-        [Switch]$Quiet=$False,
+        [Switch]$Transcribe,
     [Parameter(Mandatory=$False,Position=16)]
-        [Switch]$UseSSL,
+        [Switch]$Quiet=$False,
     [Parameter(Mandatory=$False,Position=17)]
+        [Switch]$UseSSL,
+    [Parameter(Mandatory=$False,Position=18)]
         [ValidateRange(0,65535)]
         [uint16]$Port=5985,
-    [Parameter(Mandatory=$False,Position=18)]
+    [Parameter(Mandatory=$False,Position=19)]
         [ValidateSet("Basic","CredSSP","Default","Digest","Kerberos","Negotiate","NegotiateWithImplicitCredential")]
         [String]$Authentication="Kerberos",
-    [Parameter(Mandatory=$false,Position=19)]
+    [Parameter(Mandatory=$false,Position=20)]
         [int32]$JSONDepth="10"
 )
 
@@ -358,12 +370,34 @@ Exit the script somewhat gracefully, closing any open transcript.
     Exit
 }
 
+<#
+.Synopsis
+   Create a Module + Arguments object
+.DESCRIPTION
+   Kansa parses Modules.conf and creates an array of ModuleSpec objects.
+
+   Each ModuleSpec object will specify the module to run and (optionally)
+   arguments for the module.
+.EXAMPLE
+   $Modules.Add((New-ModuleSpec $A_Module $Args))
+   Set your fancy module (in $A_Module) to be executed.   
+#>
+function New-ModuleSpec {
+    Param(
+        [Parameter()]
+            [System.IO.FileInfo]$Module,
+        [Parameter()]
+            [Object[]]$Arguments
+    )
+    return (New-Object -TypeName psobject -Property @{Module=$Module;Arguments=$Arguments})
+}
+
 function Get-Modules {
 <#
 .SYNOPSIS
 Looks for modules.conf in the $Modulepath, default is Modules. If found,
-returns an ordered hashtable of script files and their arguments, if any. 
-If no modules.conf is found, returns an ordered hashtable of all modules
+returns an ArrayList of script files and their arguments, if any. 
+If no modules.conf is found, returns an ArrayList of all modules
 found in $Modulepath, but no arguments will be present so scripts will
 run with default params. A module is a .ps1 script starting with Get-.
 #>
@@ -377,51 +411,87 @@ Param(
 
     Write-Debug "`$ModulePath is ${ModulePath}."
 
-    # User may have passed a full path to a specific module, posibly with an argument
-    $ModuleScript = ($ModulePath -split " ")[0]
-    $ModuleArgs   = @($ModulePath -split [regex]::escape($ModuleScript))[1].Trim()
-
-    $Modules = $FoundModules = @()
     # Need to maintain the order for "order of volatility"
-    $ModuleHash = New-Object System.Collections.Specialized.OrderedDictionary
+    $ModuleList = New-Object System.Collections.ArrayList
 
-    if (!(ls $ModuleScript | Select-Object -ExpandProperty PSIsContainer)) {
+    if (!(Get-ChildItem $ModulePath | Select-Object -ExpandProperty PSIsContainer)) {
         # User may have provided full path to a .ps1 module, which is how you run a single module explicitly
-        $ModuleHash.Add((ls $ModuleScript), $ModuleArgs)
+        $ModuleList.Add((New-ModuleSpec (Get-ChildItem $ModulePath) $Arguments))
 
-        if (Test-Path($ModuleScript)) {
-            $Module = ls $ModuleScript | Select-Object -ExpandProperty BaseName
-            Write-Verbose "Running module: `n$Module $ModuleArgs"
-            Return $ModuleHash
+        if (Test-Path($ModulePath)) {
+            $Module = Get-ChildItem $ModulePath | Select-Object -ExpandProperty BaseName
+            Write-Verbose "Running module: `n$Module $Arguments"
+            Return $ModuleList
         }
     }
     $ModConf = $ModulePath + "\" + "Modules.conf"
-    if (Test-Path($Modconf)) {
-        Write-Verbose "Found ${ModulePath}\Modules.conf."
+    
+    $Have_Config = $false
+   
+    if (-not $Have_Config -and (Test-Path($Modconf))) {
+        Write-Verbose "Found $ModConf."
         # ignore blank and commented lines, trim misc. white space
-        Get-Content $ModulePath\Modules.conf | Foreach-Object { $_.Trim() } | ? { $_ -gt 0 -and (!($_.StartsWith("#"))) } | Foreach-Object { $Module = $_
-            # verify listed modules exist
-            $ModuleScript = ($Module -split " ")[0]
-            $ModuleArgs   = ($Module -split [regex]::escape($ModuleScript))[1].Trim()
-            $Modpath = $ModulePath + "\" + $ModuleScript
-            if (!(Test-Path($Modpath))) {
-                "WARNING: Could not find module specified in ${ModulePath}\Modules.conf: $ModuleScript. Skipping." | Add-Content -Encoding $Encoding $ErrorLog
-            } else {
-                # module found add it and its arguments to the $ModuleHash
-                $ModuleHash.Add((ls $ModPath), $Moduleargs)
-                # $FoundModules += ls $ModPath # deprecated code, remove after testing
+        Get-Content $ModConf | Foreach-Object { $_.Trim() } | ? { $_ -gt 0 -and (!($_.StartsWith("#"))) } | Foreach-Object { $modline = $_
+
+            # explode the line and try to put the pieces back together.
+            [System.Collections.ArrayList]$line_pieces = [System.Collections.ArrayList]($modline -split " ")
+
+            # first guess; the first piece is the whole file name.
+            $Modpath = $ModulePath + "\" + $line_pieces[0]
+            $line_pieces.RemoveAt(0)
+            
+            # is $Modpath a real file? If not, then add another piece from the line, and then try again.
+            while (-not (Test-Path($Modpath)) -and $line_pieces.Count -gt 0) {
+                $Modpath = $Modpath + " " + $line_pieces[0]
+                $line_pieces.RemoveAt(0)
             }
+
+            # We either constructed a real file or ran out of pieces. One final check in case we ran out of pieces.
+            if (!(Test-Path($Modpath))) {
+                "WARNING: Could not find module specified in ${ModConf}: $ModulePath. Tried $Modpath. Skipping." | Add-Content -Encoding $Encoding $ErrorLog
+                #this goes to the next item in the Foreach-Object loop
+                return
+            }
+            if ($line_pieces.Count -gt 0) {
+
+                # we took the first N line pieces out of the array while building the module's path.
+                $Arguments = $line_pieces -join ' '
+
+                # Check for powershell syntax for an array.
+                if ($Arguments[0] -eq '@') {
+                    #New-style arguments: @('arg1','arg2','arg3')
+                    try {
+                        # Don't let bad guys edit your Modules.conf, okay?
+                        $Arguments = invoke-expression $Arguments -ErrorAction Stop
+                    } catch {
+                        "WARNING: Could not parse module arguments specified in ${ModConf} for Module ${ModuleScript}.: ${ModuleArgs}. Skipping this module." | Add-Content -Encoding $Encoding $ErrorLog
+                        #this goes to the next item in the Foreach-Object loop
+                        return
+                    }
+                } else {
+                    #Old-style arguments: arg1,arg2,arg3...
+                    $Arguments = $Arguments -split ','
+                }
+            } else {
+                $Arguments = $null
+            }
+
+            # module found add it and its arguments to the $ModuleHash
+            Write-Debug "Adding module=$ModPath Args=$Arguments"
+            $ModuleList.Add((New-ModuleSpec (Get-ChildItem $ModPath) $Arguments))  | Out-Null
         }
-        # $Modules = $FoundModules # deprecated, remove after testing
-    } else {
+        $Have_Config = $true
+    }
+    
+    if (-not $Have_Config) {
         # we had no modules.conf
-        ls -r "${ModulePath}\Get-*.ps1" | Foreach-Object { $Module = $_
-            $ModuleHash.Add($Module, $null)
+        Get-ChildItem -Recurse "${ModulePath}\Get-*.ps1" | Foreach-Object {
+            $ModuleList.Add((New-ModuleSpec $_)) | Out-Null
         }
     }
-    Write-Verbose "Running modules:`n$(($ModuleHash.Keys | Select-Object -ExpandProperty BaseName) -join "`n")"
-    $ModuleHash
+    Write-Verbose "Running modules:`n$(($ModuleList | Select-Object -expand Module | Select-Object -ExpandProperty BaseName) -join "`n")"
     Write-Debug "Exiting $($MyInvocation.MyCommand)"
+    return $ModuleList
 }
 
 function Load-AD {
@@ -528,11 +598,19 @@ Param(
     [Parameter(Mandatory=$True,Position=0)]
         [Array]$Argument
 )
-    Write-Debug "Entering ($MyInvocation.MyCommand)"
-    $Argument = $Arguments -join ""
-    $Argument -replace [regex]::Escape("\") -replace [regex]::Escape("/") -replace [regex]::Escape(":") `
-        -replace [regex]::Escape("*") -replace [regex]::Escape("?") -replace "`"" -replace [regex]::Escape("<") `
-        -replace [regex]::Escape(">") -replace [regex]::Escape("|") -replace " "
+    try {
+        return (($Argument | ConvertTo-Json -Depth 10 -Compress) -replace "[^a-zA-Z0-9_\-\.]")
+    }
+    catch {
+        Write-Warning "Get-LegalFileName: ConvertTo-Json failed. Using SHA256(ConvertTo-Xml)"
+        return ([System.BitConverter]::ToString(
+            ([System.Security.Cryptography.SHA256]::Create()).ComputeHash(
+                [System.Text.Encoding]::UTF8.GetBytes(
+                    ($Argument | ConvertTo-Xml -As Stream -Depth 10 ) -join ""
+                )
+            )
+            )).Replace("-","")
+    }
 }
 
 function Get-Directives {
@@ -580,6 +658,40 @@ Param(
     }
 }
 
+<#
+.Synopsis
+   Get nice error info
+.DESCRIPTION
+   From here:
+   https://stackoverflow.com/questions/795751/can-i-get-detailed-exception-stacktrace-in-powershell
+   and here:
+   https://blogs.msdn.microsoft.com/powershell/2006/12/07/resolve-error/
+   with modifications by Keith Twombley (c) 2017
+   License: https://msdn.microsoft.com/en-us/cc300389 (portions from Blogs.MSDN, See section Microsoft Limited Public License)
+   License: https://creativecommons.org/licenses/by-sa/3.0/ (portions from Stack Overflow)
+
+   This function is available under the terms of the Microsoft Limited Public License and the Creative Commons Attribution-ShareAlike 3.0 Unported licenses.
+#>
+function Resolve-Error {
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory=$false,
+                    ValueFromPipeline=$true)]
+        $ErrorRecord=$Error[0]
+    )
+    "ErrorRecord:"
+    Format-List -InputObject $ErrorRecord -Property * -Force | Out-String
+    "ErrorRecord.InvocationInfo:"
+    Format-List -InputObject $ErrorRecord.InvocationInfo -Property * | Out-String
+    $Exception = $ErrorRecord.Exception
+    "InnerExceptions:"
+    for ($i = 0; $Exception; $i++, ($Exception = $Exception.InnerException))
+    {   
+        "$i" * 80
+        Format-List -InputObject $Exception -Property * -Force | Out-String
+    }
+}
 
 function Get-TargetData {
 <#
@@ -590,7 +702,7 @@ Param(
     [Parameter(Mandatory=$True,Position=0)]
         [Array]$Targets,
     [Parameter(Mandatory=$True,Position=1)]
-        [System.Collections.Specialized.OrderedDictionary]$Modules,
+        [System.Collections.ArrayList]$Modules,
     [Parameter(Mandatory=$False,Position=2)]
         [System.Management.Automation.PSCredential]$Credential=$False,
     [Parameter(Mandatory=$False,Position=3)]
@@ -620,17 +732,16 @@ Param(
         $Error.Clear()
     }
 
-    $Modules.Keys | Foreach-Object { $Module = $_
-        $ModuleName  = $Module | Select-Object -ExpandProperty BaseName
-        $Arguments   = @()
-        $Arguments   += $($Modules.Get_Item($Module)) -split ","
+    $Modules | Foreach-Object { $amod = $_
+        $ModuleName  = $amod.Module | Select-Object -ExpandProperty BaseName
+        $Arguments   = $amod.Arguments
         if ($Arguments) {
             $ArgFileName = Get-LegalFileName $Arguments
         } else { $ArgFileName = "" }
             
         # Get our directives both old and new style
         $DirectivesHash  = @{}
-        $DirectivesHash = Get-Directives $Module
+        $DirectivesHash = Get-Directives $amod.Module
         if ($Pushbin) {
             $bindep = $($DirectivesHash.Get_Item("BINDEP"))
             if ($bindep) {
@@ -640,7 +751,7 @@ Param(
                 foreach ($PSSession in $PSSessions)
                 {
                     $RemoteWindir = Invoke-Command -Session $PSSession -ScriptBlock { Get-ChildItem -Force env: | Where-Object { $_.Name -match "windir" } | Select-Object -ExpandProperty value }
-                    $null = Send-File -Path (ls $bindep).FullName -Destination $RemoteWindir -Session $PSSession
+                    $null = Send-File -Path (Get-ChildItem $bindep).FullName -Destination $RemoteWindir -Session $PSSession
                 }
             }
         }
@@ -666,8 +777,7 @@ Param(
         $EstOutPathLength = $OutputPath.Length + ($GetlessMod.Length * 2) + ($ArgFileName.Length * 2)
         if ($EstOutPathLength -gt $MAXPATH) { 
             # Get the path length without the arguments, then we can determine how long $ArgFileName can be
-            $PathDiff = [int] $EstOutPathLength - ($OutputPath.Length + ($GetlessMod.Length * 2) -gt 0)
-            $MaxArgLength = $PathDiff - $MAXPATH
+            $MaxArgLength = [System.Math]::Floor(([int] $MAXPATH - ($OutputPath.Length + ($GetlessMod.Length * 2))) / 3)
             if ($MaxArgLength -gt 0 -and $MaxArgLength -lt $ArgFileName.Length) {
                 $OrigArgFileName = $ArgFileName
                 $ArgFileName = $ArgFileName.Substring(0, $MaxArgLength)
@@ -681,17 +791,19 @@ Param(
             
             # Log errors from child jobs, including module and host that failed.
             if($Error) {
-                $ModuleName + " reports error on " + $ChildJob.Location + ": `"" + $Error + "`"" | Add-Content -Encoding $Encoding $ErrorLog
+                $ModuleName + " reports error on " + $ChildJob.Location + ": " | Add-Content -Encoding $Encoding $ErrorLog
+                (Resolve-Error $Error[0]) -join "`n" | Add-Content -Encoding $Encoding $ErrorLog
                 $Error.Clear()
-                Return
+        ggg        #do not return here. Keep going to try to get more output.
             }
 
             # Now that we know our hostname, let's double check our path length, if it's too long, we'll write an error
             # Max path is 260 characters, if we're over 256, we can't accomodate an extension
             $Outfile = $OutputPath + $GetlessMod + $ArgFileName + "\" + $ChildJob.Location + "-" + $GetlessMod + $ArgFileName
             if ($Outfile.length -gt 256) {
-                "ERROR: ${GetlessMod}'s output path length exceeds 260 character limit. Can't write the output to disk for $($ChildJob.Location)." | Add-Content -Encoding $Encoding $ErrorLog
-                Return
+                write-warning "${GetlessMod}'s output path length exceeds 260 character limit. truncating filename for $($ChildJob.Location)." | Add-Content -Encoding $Encoding $ErrorLog
+                $Outfile = $Outfile.substring(0,256)
+                #do not return here. Keep going to try to get more output.
             }
 
             # save the data
@@ -739,7 +851,7 @@ Param(
 
         if ($rmbin) {
             if ($bindep) {
-                Remove-Bindep -Targets $Targets -Module $Module -Bindep $bindep -Credential $Credential
+                Remove-Bindep -Targets $Targets -Module $amod.Module -Bindep $bindep -Credential $Credential
             }
         }
 
@@ -953,7 +1065,7 @@ function Send-File
 			}
 			catch
 			{
-				Write-Error $_.Exception.Message
+				Write-Error ((Resolve-Error $_) -join "`n")
 			}
 		}
 	}
@@ -1012,13 +1124,13 @@ Param(
     Write-Debug "Entering $($MyInvocation.MyCommand)"
     $Error.Clear()
 
-    ls $ModulePath | Foreach-Object { $dir = $_
+    Get-ChildItem $ModulePath | Foreach-Object { $dir = $_
         if ($dir.PSIsContainer -and ($dir.name -ne "bin" -or $dir.name -ne "Private")) {
-            ls "${ModulePath}\${dir}\Get-*" | Foreach-Object { $file = $_
+            Get-ChildItem "${ModulePath}\${dir}\Get-*" | Foreach-Object { $file = $_
                 $($dir.Name + "\" + (split-path -leaf $file))
             }
         } else {
-            ls "${ModulePath}\Get-*" | Foreach-Object { $file = $_
+            Get-ChildItem "${ModulePath}\Get-*" | Foreach-Object { $file = $_
                 $file.Name
             }
         }
@@ -1045,7 +1157,7 @@ function Set-KansaPath {
         $env:Path = $env:Path + ";$kansapath\Analysis"
     }
 
-    $AnalysisPaths = (ls -Recurse "$kansapath\Analysis" | Where-Object { $_.PSIsContainer } | Select-Object -ExpandProperty FullName)
+    $AnalysisPaths = (Get-ChildItem -Recurse "$kansapath\Analysis" | Where-Object { $_.PSIsContainer } | Select-Object -ExpandProperty FullName)
     $AnalysisPaths | ForEach-Object {
         if (-not($Paths -match [regex]::Escape($_))) {
             $env:Path = $env:Path + ";$_"
@@ -1220,7 +1332,7 @@ if ($TargetList) {
 } elseif ($Target) {
     $Targets = $Target
 } else {
-    Write-Verbose "No Targets specified. Building one requires RAST and will take some time."
+    Write-Verbose "No Targets specified. Building one requires RSAT and will take some time."
     [void] (Load-AD)
     $Targets  = Get-Targets -TargetCount $TargetCount
 }
@@ -1245,12 +1357,10 @@ if ($rmbin) {
 # Done removing binaries #
 
 
-# Clean up #
-Exit
 # We're done. #
 
 } Catch {
-    ("Caught: {0}" -f $_)
+    Resolve-Error $_
 } Finally {
     Exit-Script
 }
